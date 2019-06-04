@@ -19,19 +19,23 @@ def helpMessage() {
 
     The typical command for running the pipeline is as follows:
 
-    nextflow run nf-core/genomes --reads '*_R{1,2}.fastq.gz' -profile docker
+    nextflow run nf-core/genomes --fasta genome.fa --gtf transcript.gtf --genome GRCh38 --release 96 -profile docker
 
     Mandatory arguments:
-      --reads                       Path to input data (must be surrounded with quotes)
       -profile                      Configuration profile to use. Can use multiple (comma separated)
                                     Available: conda, docker, singularity, awsbatch, test and more.
 
-    Options:
-      --genome                      Name of iGenomes reference
-      --singleEnd                   Specifies that the input is single end reads
-
     References                      If not specified in the configuration file or you wish to overwrite any of the references.
       --fasta                       Path to Fasta reference
+      --gtf                         GTF file
+      --genome
+      --release
+      --organism
+
+    Tools
+      --star
+      --hisat2
+      --rnaseq
 
     Other options:
       --outdir                      The output directory where the results will be saved
@@ -55,14 +59,14 @@ if (params.help){
     exit 0
 }
 
-// Check if genome exists in the config file
-if (params.genomes && params.genome && !params.genomes.containsKey(params.genome)) {
-    exit 1, "The provided genome '${params.genome}' is not available in the iGenomes file. Currently the available genomes are ${params.genomes.keySet().join(", ")}"
-}
-
 // TODO nf-core: Add any reference files that are needed
+if( !params.release ) exit 1, "--release need to be set up"
+if( !params.genome ) exit 1, "--genome need to be set up"
+if( !params.organism ) exit 1, "--organism need to be set up"
+
+outdir = "${params.outdir}/${params.organism}/${params.genome}.${params.release}"
+
 // Configurable reference genomes
-fasta = params.genome ? params.genomes[ params.genome ].fasta ?: false : false
 if ( params.fasta ){
     fasta = file(params.fasta)
     if( !fasta.exists() ) exit 1, "Fasta file not found: ${params.fasta}"
@@ -73,6 +77,13 @@ if ( params.fasta ){
 //   input:
 //   file fasta from fasta
 //
+Channel.fromPath(params.fasta)
+       .ifEmpty { exit 1, "Fasta file not found: ${params.fasta}" }
+       .set { ch_fasta_for_cp }
+
+Channel.fromPath(params.gtf)
+       .ifEmpty { exit 1, "gtf file not found: ${params.gtf}" }
+       .set { ch_gtf_for_cp }
 
 
 // Has the run name been specified by the user?
@@ -88,39 +99,13 @@ if( workflow.profile == 'awsbatch') {
   if (!params.awsqueue || !params.awsregion) exit 1, "Specify correct --awsqueue and --awsregion parameters on AWSBatch!"
   // Check outdir paths to be S3 buckets if running on AWSBatch
   // related: https://github.com/nextflow-io/nextflow/issues/813
-  if (!params.outdir.startsWith('s3:')) exit 1, "Outdir not on S3 - specify S3 Bucket to run on AWSBatch!"
+  if (!outdir.startsWith('s3:')) exit 1, "Outdir not on S3 - specify S3 Bucket to run on AWSBatch!"
   // Prevent trace files to be stored on S3 since S3 does not support rolling files.
   if (workflow.tracedir.startsWith('s3:')) exit 1, "Specify a local tracedir or run without trace! S3 cannot be used for tracefiles."
 }
 
 // Stage config files
-ch_multiqc_config = Channel.fromPath(params.multiqc_config)
 ch_output_docs = Channel.fromPath("$baseDir/docs/output.md")
-
-/*
- * Create a channel for input read files
- */
-if(params.readPaths){
-    if(params.singleEnd){
-        Channel
-            .from(params.readPaths)
-            .map { row -> [ row[0], [file(row[1][0])]] }
-            .ifEmpty { exit 1, "params.readPaths was empty - no input files supplied" }
-            .into { read_files_fastqc; read_files_trimming }
-    } else {
-        Channel
-            .from(params.readPaths)
-            .map { row -> [ row[0], [file(row[1][0]), file(row[1][1])]] }
-            .ifEmpty { exit 1, "params.readPaths was empty - no input files supplied" }
-            .into { read_files_fastqc; read_files_trimming }
-    }
-} else {
-    Channel
-        .fromFilePairs( params.reads, size: params.singleEnd ? 1 : 2 )
-        .ifEmpty { exit 1, "Cannot find any reads matching: ${params.reads}\nNB: Path needs to be enclosed in quotes!\nIf this is single-end data, please specify --singleEnd on the command line." }
-        .into { read_files_fastqc; read_files_trimming }
-}
-
 
 // Header log info
 log.info nfcoreHeader()
@@ -128,12 +113,10 @@ def summary = [:]
 if(workflow.revision) summary['Pipeline Release'] = workflow.revision
 summary['Run Name']         = custom_runName ?: workflow.runName
 // TODO nf-core: Report custom parameters here
-summary['Reads']            = params.reads
 summary['Fasta Ref']        = params.fasta
-summary['Data Type']        = params.singleEnd ? 'Single-End' : 'Paired-End'
 summary['Max Resources']    = "$params.max_memory memory, $params.max_cpus cpus, $params.max_time time per job"
 if(workflow.containerEngine) summary['Container'] = "$workflow.containerEngine - $workflow.container"
-summary['Output dir']       = params.outdir
+summary['Output dir']       = outdir
 summary['Launch dir']       = workflow.launchDir
 summary['Working dir']      = workflow.workDir
 summary['Script dir']       = workflow.projectDir
@@ -148,7 +131,6 @@ if(params.config_profile_contact)     summary['Config Contact']     = params.con
 if(params.config_profile_url)         summary['Config URL']         = params.config_profile_url
 if(params.email) {
   summary['E-mail Address']  = params.email
-  summary['MultiQC maxsize'] = params.maxMultiqcEmailFileSize
 }
 log.info summary.collect { k,v -> "${k.padRight(18)}: $v" }.join("\n")
 log.info "\033[2m----------------------------------------------------\033[0m"
@@ -178,7 +160,7 @@ ${summary.collect { k,v -> "            <dt>$k</dt><dd><samp>${v ?: '<span style
  * Parse software version numbers
  */
 process get_software_versions {
-    publishDir "${params.outdir}/pipeline_info", mode: 'copy',
+    publishDir "${outdir}/pipeline_info", mode: 'copy',
     saveAs: {filename ->
         if (filename.indexOf(".csv") > 0) filename
         else null
@@ -193,70 +175,241 @@ process get_software_versions {
     """
     echo $workflow.manifest.version > v_pipeline.txt
     echo $workflow.nextflow.version > v_nextflow.txt
-    fastqc --version > v_fastqc.txt
-    multiqc --version > v_multiqc.txt
     scrape_software_versions.py &> software_versions_mqc.yaml
     """
 }
 
+process copy_fasta {
+  publishDir path: { "${outdir}/seq"},
+  mode: 'copy'
 
+  input:
+  file fasta from ch_fasta_for_cp
+
+  output:
+  file "${params.genome}.${params.release}.fa" into ch_fasta_for_star_index, ch_fasta_for_hisat_index, ch_fasta_for_txome, ch_fasta_for_gentrome, ch_fasta_for_config
+  file "${params.genome}.${params.release}.fa.fai"
+  
+  script:
+  """
+  cp ${fasta} ${params.genome}.${params.release}.fa
+  samtools faidx ${params.genome}.${params.release}.fa
+"""
+}
+
+process copy_gtf {
+  publishDir path: { "${outdir}/rnaseq"},
+  mode: 'copy'
+
+  input:
+  file gtf from ch_gtf_for_cp
+
+  output:
+  file "${params.genome}.${params.release}.gtf" into gtf_makeHisatSplicesites, gtf_makeHISATindex, gtf_makeSTARindex, ch_gtf_for_txome, ch_gtf_for_gentrome, ch_gtf_for_config
+  file "${params.genome}.${params.release}_pre.gtf" into ch_pre_gtf
+  
+  script:
+  """
+  cp ${gtf} ${params.genome}.${params.release}.gtf
+  awk '\$3=="transcript"' ${gtf}  | sed 's/\ttranscript\t/\texon\t/' > ${params.genome}.${params.release}_pre.gtf
+  """
+}
 
 /*
- * STEP 1 - FastQC
+ * GENOME INDEX - Build STAR index
  */
-process fastqc {
-    tag "$name"
-    publishDir "${params.outdir}/fastqc", mode: 'copy',
-        saveAs: {filename -> filename.indexOf(".zip") > 0 ? "zips/$filename" : "$filename"}
+if(params.star &&  params.fasta){
+    process makeSTARindex {
+        label 'high_memory'
+        tag "$fasta"
+        publishDir path: { "${outdir}/star" },
+                   mode: 'copy'
 
-    input:
-    set val(name), file(reads) from read_files_fastqc
+        input:
+        file fasta from ch_fasta_for_star_index
+        file gtf from gtf_makeSTARindex
 
-    output:
-    file "*_fastqc.{zip,html}" into fastqc_results
+        output:
+        file "star" into star_index
 
-    script:
-    """
-    fastqc -q $reads
-    """
+        script:
+        def avail_mem = task.memory ? "--limitGenomeGenerateRAM ${task.memory.toBytes() - 100000000}" : ''
+        """
+        mkdir star
+        STAR \\
+            --runMode genomeGenerate \\
+            --runThreadN ${task.cpus} \\
+            --sjdbGTFfile $gtf \\
+            --genomeDir star/ \\
+            --genomeFastaFiles $fasta \\
+            $avail_mem
+        """
+    }
+}
+
+/*
+ * PREPROCESSING - Build HISAT2 splice sites file
+ */
+if(params.hisat2 && params.gtf){
+    process makeHisatSplicesites {
+        tag "$gtf"
+        publishDir path: { "${outdir}/hisat2" },
+                   mode: 'copy'
+
+        input:
+        file gtf from gtf_makeHisatSplicesites
+
+        output:
+        file "${gtf.baseName}.hisat2_splice_sites.txt" into indexing_splicesites, alignment_splicesites
+
+        script:
+        """
+        hisat2_extract_splice_sites.py $gtf > ${gtf.baseName}.hisat2_splice_sites.txt
+        """
+    }
+}
+
+/*
+ * GENOME INDEX - Build HISAT2 index
+ */
+if(params.hisat2 && params.fasta){
+    process makeHISATindex {
+        tag "$fasta"
+        label 'high_memory'
+        publishDir path: { "${outdir}/hisat2" },
+                   mode: 'copy'
+
+        input:
+        file fasta from ch_fasta_for_hisat_index
+        file indexing_splicesites from indexing_splicesites
+        file gtf from gtf_makeHISATindex
+
+        output:
+        file "${fasta.baseName}.*.ht2*" into hs2_indices
+
+        script:
+        if( !task.memory ){
+            log.info "[HISAT2 index build] Available memory not known - defaulting to 0. Specify process memory requirements to change this."
+            avail_mem = 0
+        } else {
+            log.info "[HISAT2 index build] Available memory: ${task.memory}"
+            avail_mem = task.memory.toGiga()
+        }
+        if( avail_mem > params.hisatBuildMemory ){
+            log.info "[HISAT2 index build] Over ${params.hisatBuildMemory} GB available, so using splice sites and exons in HISAT2 index"
+            extract_exons = "hisat2_extract_exons.py $gtf > ${gtf.baseName}.hisat2_exons.txt"
+            ss = "--ss $indexing_splicesites"
+            exon = "--exon ${gtf.baseName}.hisat2_exons.txt"
+        } else {
+            log.info "[HISAT2 index build] Less than ${params.hisatBuildMemory} GB available, so NOT using splice sites and exons in HISAT2 index."
+            log.info "[HISAT2 index build] Use --hisatBuildMemory [small number] to skip this check."
+            extract_exons = ''
+            ss = ''
+            exon = ''
+        }
+        """
+        $extract_exons
+        hisat2-build -p ${task.cpus} $ss $exon $fasta ${fasta.baseName}.hisat2_index
+        """
+    }
 }
 
 
+/*
+ * gtf to txome 
+ */
+if(params.rnaseq){
+  process makeTxome {
+  publishDir path: { "${outdir}/rnaseq"},
+  mode: 'copy'
+  
+  input:
+  file fasta from ch_fasta_for_txome
+  file gtf from ch_gtf_for_txome
+  file pre_gtf from ch_pre_gtf
+
+  output:
+  file "tx_${gtf.baseName}.fa" into ch_txfasta_for_gentrome, ch_txfasta_for_config
+  file "tx_${pre_gtf.baseName}.fa" into ch_pre_txfasta_for_config
+
+  script:
+  """
+  gffread -w tx_${gtf.baseName}.fa -g $fasta $gtf
+  gffread -w tx_${pre_gtf.baseName}.fa -g $fasta $gtf
+  """
+}
+}
 
 /*
- * STEP 2 - MultiQC
+ * gentrome 
  */
-process multiqc {
-    publishDir "${params.outdir}/MultiQC", mode: 'copy'
-
-    input:
-    file multiqc_config from ch_multiqc_config
-    // TODO nf-core: Add in log files from your new processes for MultiQC to find!
-    file ('fastqc/*') from fastqc_results.collect().ifEmpty([])
-    file ('software_versions/*') from software_versions_yaml.collect()
-    file workflow_summary from create_workflow_summary(summary)
-
-    output:
-    file "*multiqc_report.html" into multiqc_report
-    file "*_data"
-    file "multiqc_plots"
-
-    script:
-    rtitle = custom_runName ? "--title \"$custom_runName\"" : ''
-    rfilename = custom_runName ? "--filename " + custom_runName.replaceAll('\\W','_').replaceAll('_+','_') + "_multiqc_report" : ''
-    // TODO nf-core: Specify which MultiQC modules to use with -m for a faster run time
-    """
-    multiqc -f $rtitle $rfilename --config $multiqc_config .
-    """
+if(params.rnaseq){
+  process makeGenotrome {
+  publishDir path: { "${outdir}/rnaseq"},
+  mode: 'copy'
+  
+  input:
+  file fasta from ch_fasta_for_gentrome
+  file gtf from ch_gtf_for_gentrome
+  file txome from ch_txfasta_for_gentrome
+  
+  output:
+  file 'gentrome.fa' into ch_gentrome_for_config
+  file 'decoys.txt' into ch_decoys_for_config
+  
+  script:
+  """
+  wget https://github.com/COMBINE-lab/SalmonTools/raw/master/scripts/generateDecoyTranscriptome.sh
+  chmod +x generateDecoyTranscriptome.sh
+  ./generateDecoyTranscriptome.sh -j ${task.cpus} -a $gtf -g $fasta -t $txome -o .
+  """
+}
 }
 
 
+process config_file {
+  publishDir "${outdir}", mode: 'copy'
+  
+  input:
+  file fasta from ch_fasta_for_config
+  file gtf from ch_gtf_for_config
+  file txfasta from ch_txfasta_for_config
+  file pre_txfasta from ch_pre_txfasta_for_config
+  file gentrome from ch_gentrome_for_config
+  file decoys from ch_decoys_for_config
+  
+  output:
+  file "${params.genome}.${params.release}.config"
+  
+  
+  script:
+  hisat2_index = ""
+  star_index = ""
+  base_genome = "${params.organism}/${params.genome}.${params.release}"
+  if (params.hisat2) {hisat2_index = "hisat2_index = \\\${params.genome_path}/${base_genome}/hisat2/${params.genome}.${params.release}"}
+  if (params.star) {star_index = "star_index = \\\${params.genome_path}/${base_genome}/star"}
+  config = "${params.genome}.${params.release}.config"
+  """
+  echo "// params.genome_path = ${params.outdir}" >> $config
+  echo "params {" >> $config
+  echo "  fasta = \\\${params.genome_path}/${base_genome}/seq/$fasta" >>$config
+  echo "  transcriptome = \\\${params.genome_path}/${base_genome}/rnaseq/$txfasta" >>$config
+  echo "  pre_transcriptome = \\\${params.genome_path}/${base_genome}/rnaseq/$pre_txfasta" >>$config
+  echo "  gtf = \\\${params.genome_path}/${base_genome}/rnaseq/$gtf" >>$config
+  echo "  gentrome = \\\${params.genome_path}/${base_genome}/rnaseq/$gentrome" >>$config
+  echo "  decoys = \\\${params.genome_path}/${base_genome}/rnaseq/$decoys" >>$config
+  echo "  $hisat2_index" >>$config
+  echo "  $star_index" >>$config
+  echo "}" >>$config
+  """
+  
+}
 
 /*
  * STEP 3 - Output Description HTML
  */
 process output_documentation {
-    publishDir "${params.outdir}/pipeline_info", mode: 'copy'
+    publishDir "${outdir}/pipeline_info", mode: 'copy'
 
     input:
     file output_docs from ch_output_docs
@@ -266,11 +419,10 @@ process output_documentation {
 
     script:
     """
-    markdown_to_html.r $output_docs results_description.html
+    # markdown_to_html.r $output_docs results_description.html
+    touch results_description.html
     """
 }
-
-
 
 /*
  * Completion e-mail notification
@@ -306,21 +458,6 @@ workflow.onComplete {
     email_fields['summary']['Nextflow Build'] = workflow.nextflow.build
     email_fields['summary']['Nextflow Compile Timestamp'] = workflow.nextflow.timestamp
 
-    // TODO nf-core: If not using MultiQC, strip out this code (including params.maxMultiqcEmailFileSize)
-    // On success try attach the multiqc report
-    def mqc_report = null
-    try {
-        if (workflow.success) {
-            mqc_report = multiqc_report.getVal()
-            if (mqc_report.getClass() == ArrayList){
-                log.warn "[nf-core/genomes] Found multiple reports from process 'multiqc', will use only one"
-                mqc_report = mqc_report[0]
-            }
-        }
-    } catch (all) {
-        log.warn "[nf-core/genomes] Could not attach MultiQC report to summary email"
-    }
-
     // Render the TXT template
     def engine = new groovy.text.GStringTemplateEngine()
     def tf = new File("$baseDir/assets/email_template.txt")
@@ -353,7 +490,7 @@ workflow.onComplete {
     }
 
     // Write summary e-mail HTML to a file
-    def output_d = new File( "${params.outdir}/pipeline_info/" )
+    def output_d = new File( "${outdir}/pipeline_info/" )
     if( !output_d.exists() ) {
       output_d.mkdirs()
     }

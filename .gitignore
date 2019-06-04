@@ -1,5 +1,6 @@
 .nextflow*
 work/
+genomes/
 data/
 results/
 .DS_Store
