@@ -222,7 +222,7 @@ if(params.star &&  params.fasta){
     process makeSTARindex {
         label 'high_memory'
         tag "$fasta"
-        publishDir path: { "${outdir}/star" },
+        publishDir path: { "${outdir}" },
                    mode: 'copy'
 
         input:
@@ -275,7 +275,6 @@ if(params.hisat2 && params.gtf){
 if(params.hisat2 && params.fasta){
     process makeHISATindex {
         tag "$fasta"
-        label 'high_memory'
         publishDir path: { "${outdir}/hisat2" },
                    mode: 'copy'
 
@@ -344,7 +343,7 @@ if(params.rnaseq){
  * gentrome 
  */
 if(params.rnaseq){
-  process makeGenotrome {
+  process makeGentrome {
   publishDir path: { "${outdir}/rnaseq"},
   mode: 'copy'
   
@@ -386,18 +385,18 @@ process config_file {
   hisat2_index = ""
   star_index = ""
   base_genome = "${params.organism}/${params.genome}.${params.release}"
-  if (params.hisat2) {hisat2_index = "hisat2_index = \\\${params.genome_path}/${base_genome}/hisat2/${params.genome}.${params.release}"}
-  if (params.star) {star_index = "star_index = \\\${params.genome_path}/${base_genome}/star"}
+  if (params.hisat2) {hisat2_index = "hisat2_index = \\\"\\\${params.genome_path}/${base_genome}/hisat2/${params.genome}.${params.release}.hisat2_index\\\""}
+  if (params.star) {star_index = "star_index = \\\"\\\${params.genome_path}/${base_genome}/star\\\""}
   config = "${params.genome}.${params.release}.config"
   """
   echo "// params.genome_path = ${params.outdir}" >> $config
   echo "params {" >> $config
-  echo "  fasta = \\\${params.genome_path}/${base_genome}/seq/$fasta" >>$config
-  echo "  transcriptome = \\\${params.genome_path}/${base_genome}/rnaseq/$txfasta" >>$config
-  echo "  pre_transcriptome = \\\${params.genome_path}/${base_genome}/rnaseq/$pre_txfasta" >>$config
-  echo "  gtf = \\\${params.genome_path}/${base_genome}/rnaseq/$gtf" >>$config
-  echo "  gentrome = \\\${params.genome_path}/${base_genome}/rnaseq/$gentrome" >>$config
-  echo "  decoys = \\\${params.genome_path}/${base_genome}/rnaseq/$decoys" >>$config
+  echo "  fasta = \\\"\\\${params.genome_path}/${base_genome}/seq/$fasta\\\"" >>$config
+  echo "  transcriptome = \\\"\\\${params.genome_path}/${base_genome}/rnaseq/$txfasta\\\"" >>$config
+  echo "  pre_transcriptome = \\\"\\\${params.genome_path}/${base_genome}/rnaseq/$pre_txfasta\\\"" >>$config
+  echo "  gtf = \\\"\\\${params.genome_path}/${base_genome}/rnaseq/$gtf\\\"" >>$config
+  echo "  gentrome = \\\"\\\${params.genome_path}/${base_genome}/rnaseq/$gentrome\\\"" >>$config
+  echo "  decoys = \\\"\\\${params.genome_path}/${base_genome}/rnaseq/$decoys\\\"" >>$config
   echo "  $hisat2_index" >>$config
   echo "  $star_index" >>$config
   echo "}" >>$config
